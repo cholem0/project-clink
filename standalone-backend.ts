@@ -84,7 +84,7 @@ function cleanMsg(msg: string): CleanMessage | null {
         };
       } else if (payload.payload?.type === "donate_emoji") {
         return {
-          type: "new_follow",
+          type: "donate_emoji",
           username: payload.payload?.data.sponsor_username || "undefined",
           donate_message: payload.payload?.data.donate_message,
           ruby_amount: payload.payload?.data.emoji_coin_count || 0,
