@@ -1,21 +1,12 @@
-
-import { resolve } from "node:path";
-
 interface CleanMessage {
-  type: "new_follow" | "donate_emoji" | "stat";
+  type: "new_follow" | "donate_emoji" | "stat" | "new_sub_gift";
   username?: string;
+  donate_message?: string;
+  gifter?: string;
+
+  months?: number;
   ruby_amount?: number;
   live_count?: number;
-}
-interface AparatPayload {
-  type: string;
-  data: {
-    username?: string;
-    sponsor_username?: string;
-    emoji_coin_count?: number;
-    live?: number;
-
-  };
 }
 
 interface AparatResponse {
@@ -23,27 +14,43 @@ interface AparatResponse {
   response_data?: {
     live?: number;
     payload?: {
-      type?: "new_follow" | "donate_emoji";
+      type?: "new_follow" | "donate_emoji" | "new_sub_gift";
       data: {
         username?: string;
         sponsor_username?: string;
+        gifter?: string;
         emoji_coin_count?: number;
+        donate_message?: string;
+        months?: number;
       };
     };
   };
-
 }
+interface AparataJwtResponse {
+  jwt: string;
+}
+const STREAMER_NAME = "cholemo";
+const FOLLOW_COOLDOWN = 30 * 60 * 1000;
+const CLEANUP_INTERVAL = 45 * 60 * 1000;
 
-const STREAMER_NAME = "rest_in_peace";
 const WS_CLIENTS = new Set<WebSocket>();
-// const sharedData: string[] = [];
+const RECENT_FOLLOWS = new Map<string, number>();
+
+function wait(ms: number) {
+  return new Promise(function (resolve) {
+    setTimeout(resolve, ms);
+  });
+}
 async function getJwt(streamerName: string): Promise<string> {
   try {
     const response = await fetch(
       `https://www.aparat.com/api/fa/v2/Live/LiveStream/show/username/${streamerName}`,
     );
-    const data = (await response.json()) as any;
+    if (!response.ok) {
+      throw new Error("Response Failed");
+    }
 
+    const data = (await response.json()) as AparataJwtResponse;
     return data.jwt;
   } catch (error) {
     console.error("Error fetching JWT:", error);
@@ -61,15 +68,33 @@ function cleanMsg(msg: string): CleanMessage | null {
 
     if (payloadType === "update_status") {
       if (payload.payload?.type === "new_follow") {
+        const username = payload.payload.data.username || "undefined";
+        const now = Date.now();
+        const lastFollowTime = RECENT_FOLLOWS.get(username);
+
+        if (lastFollowTime && (now - lastFollowTime < FOLLOW_COOLDOWN)) {
+          console.log(`Dup detected ${username}`);
+          return null;
+        }
+
+        RECENT_FOLLOWS.set(username, now);
         return {
           type: "new_follow",
-          username: payload.payload.data.username || "undefined",
+          username: username || "undefined",
         };
       } else if (payload.payload?.type === "donate_emoji") {
         return {
           type: "new_follow",
           username: payload.payload?.data.sponsor_username || "undefined",
+          donate_message: payload.payload?.data.donate_message,
           ruby_amount: payload.payload?.data.emoji_coin_count || 0,
+        };
+      } else if (payload.payload?.type === "new_sub_gift") {
+        return {
+          type: "new_sub_gift",
+          username: payload.payload?.data.sponsor_username || "undefined",
+          gifter: payload.payload?.data.gifter,
+          months: payload.payload?.data.months || 0,
         };
       }
     }
@@ -86,9 +111,12 @@ function cleanMsg(msg: string): CleanMessage | null {
   }
 }
 async function connectToAparat() {
+  let retry = 0;
+  const DELAY = 5000;
   while (true) {
     try {
       const jwtoken = await getJwt(STREAMER_NAME);
+      retry = 0;
       const uri =
         `wss://lws.aparat.com/v1?JWT=${jwtoken}&source=aparat&room=${STREAMER_NAME}`;
       console.log(uri);
@@ -113,7 +141,9 @@ async function connectToAparat() {
         };
       });
     } catch (err) {
+      retry++;
       console.log(`Connection Failed : ${err}`);
+      await wait(DELAY);
     }
   }
 }
@@ -128,10 +158,21 @@ function broadcaster(data: CleanMessage) {
       WS_CLIENTS.delete(client);
     }
   }
+}
 
+function cleanupCache() {
+  const now = Date.now();
+  for (const [username, time] of RECENT_FOLLOWS) {
+    if (now - time > FOLLOW_COOLDOWN) {
+      RECENT_FOLLOWS.delete(username);
+      console.log(`${username} cleared.`);
+    }
+  }
 }
 function startLocalWS() {
   console.log("WS Server started at wss://localhost:10000");
+
+  setInterval(cleanupCache, CLEANUP_INTERVAL);
   Deno.serve({ port: 10000 }, (req) => {
     if (req.headers.get("upgrade") !== "websocket") {
       return new Response("WebSocket only", { status: 400 });
